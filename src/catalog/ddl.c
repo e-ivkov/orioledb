@@ -952,6 +952,7 @@ orioledb_utility_command(PlannedStmt *pstmt,
 						case AT_SetIdentity:
 						case AT_SetNotNull:
 						case AT_SetRelOptions:
+						case AT_SetStorage:
 							break;
 						default:
 							ereport(ERROR,
@@ -966,6 +967,11 @@ orioledb_utility_command(PlannedStmt *pstmt,
 					{
 						case AT_AlterColumnType:
 							o_alter_column_type(cmd, queryString, rel);
+							break;
+						case AT_SetStorage:
+							ereport(WARNING,
+									(errmsg("ALTER COLUMN ... SET STORAGE ignored on OrioleDB tables"),
+									 errdetail("SET STORAGE is not yet implemented but command was bypassed for compatibility.")));
 							break;
 						default:
 							break;

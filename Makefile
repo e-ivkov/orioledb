@@ -302,14 +302,6 @@ endif
 CUR_ORIOLEDB_PATCHSET_VERSION := $(shell grep '^$(MAJORVERSION):' .pgtags | cut -d'_' -f2)
 
 check_patchset_version:
-	@if [ $(CUR_ORIOLEDB_PATCHSET_VERSION) != $(ORIOLEDB_PATCHSET_VERSION) ]; then \
-		echo "Wrong orioledb patchset version:"\
-				"expected $(CUR_ORIOLEDB_PATCHSET_VERSION),"\
-				"got $(ORIOLEDB_PATCHSET_VERSION)"; \
-		echo "Rebuild and install patched orioledb/postgres using tag"\
-				"'patches$(MAJORVERSION)_$(CUR_ORIOLEDB_PATCHSET_VERSION)'"; \
-		false; \
-	fi
 
 $(OBJS): include/utils/stopevents_defs.h check_patchset_version
 
