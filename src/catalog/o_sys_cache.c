@@ -23,6 +23,7 @@
 #include "catalog/sys_trees.h"
 #include "recovery/recovery.h"
 #include "recovery/wal.h"
+#include "storage/lockdefs.h"
 #include "transam/oxid.h"
 #include "tuple/toast.h"
 #include "utils/planner.h"
@@ -83,6 +84,9 @@ static int	o_sys_cache_key_cmp(OSysCache *sys_cache, int nkeys,
 								OSysCacheKey *key1, OSysCacheKey *key2);
 static void o_sys_cache_keys_to_str(StringInfo buf, OSysCache *sys_cache,
 									OSysCacheKey *key);
+static void o_sys_cache_lock(OSysCache *sys_cache, OSysCacheKey *key, int lockmode);
+static void
+o_sys_cache_unlock(OSysCache *sys_cache, OSysCacheKey *key, int lockmode);
 
 static BTreeDescr *oSysCacheToastGetBTreeDesc(void *arg);
 static uint32 oSysCacheToastGetMaxChunkSize(void *key, void *arg);
@@ -486,11 +490,16 @@ o_sys_cache_search(OSysCache *sys_cache, int nkeys, OSysCacheKey *key)
 	else
 		fast_cache_entry->tree_entries = NIL;
 
+	o_sys_cache_lock(sys_cache, key, AccessShareLock);
+	
 	prev_context = MemoryContextSwitchTo(sys_cache->mcxt);
 	if (sys_cache->is_toast)
 		tree_entry = o_sys_cache_get_from_toast_tree(sys_cache, key);
 	else
 		tree_entry = o_sys_cache_get_from_tree(sys_cache, nkeys, key);
+	
+	o_sys_cache_unlock(sys_cache, key, AccessShareLock);
+	
 	if (tree_entry == NULL)
 	{
 		MemoryContextSwitchTo(prev_context);
@@ -878,14 +887,12 @@ o_sys_cache_add_if_needed(OSysCache *sys_cache, OSysCacheKey *key, Pointer arg)
 	bool		inserted PG_USED_FOR_ASSERTS_ONLY;
 	bool		found = false;
 
-	o_sys_cache_lock(sys_cache, key, AccessExclusiveLock);
 
 	entry = o_sys_cache_search(sys_cache, sys_cache->nkeys, key);
 	found = entry != NULL;
 
 	if (found)
 	{
-		o_sys_cache_unlock(sys_cache, key, AccessExclusiveLock);
 		return;
 	}
 
@@ -896,6 +903,7 @@ o_sys_cache_add_if_needed(OSysCache *sys_cache, OSysCacheKey *key, Pointer arg)
 	/*
 	 * All done, now try to insert into B-tree.
 	 */
+	o_sys_cache_lock(sys_cache, key, AccessExclusiveLock);
 	inserted = o_sys_cache_add(sys_cache, key, entry);
 	Assert(inserted);
 	o_sys_cache_unlock(sys_cache, key, AccessExclusiveLock);
@@ -910,8 +918,6 @@ o_sys_cache_update_if_needed(OSysCache *sys_cache, OSysCacheKey *key,
 	OSysCacheKey *sys_cache_key;
 	bool		updated PG_USED_FOR_ASSERTS_ONLY;
 
-	o_sys_cache_lock(sys_cache, key, AccessExclusiveLock);
-
 	o_sys_cache_set_datoid_lsn(&key->common.lsn, NULL);
 	entry = o_sys_cache_search(sys_cache, sys_cache->nkeys, key);
 	if (entry == NULL)
@@ -923,6 +929,7 @@ o_sys_cache_update_if_needed(OSysCache *sys_cache, OSysCacheKey *key,
 	sys_cache_key = (OSysCacheKey *) entry;
 	sys_cache->funcs->fill_entry(&entry, sys_cache_key, arg);
 
+	o_sys_cache_lock(sys_cache, key, AccessExclusiveLock);
 	updated = o_sys_cache_update(sys_cache, entry);
 	Assert(updated);
 	o_sys_cache_unlock(sys_cache, key, AccessExclusiveLock);
