@@ -57,19 +57,22 @@ typedef struct PagePoolOps
 
 	OInMemoryBlkno (*free_pages_count) (PagePool *pool);
 	OInMemoryBlkno (*dirty_pages_count) (PagePool *pool);
-	void		(*run_clock) (PagePool *pool, bool evict, volatile sig_atomic_t *shutdown_requested);
+	void		(*run_maintenance) (PagePool *pool, bool evict, volatile sig_atomic_t *shutdown_requested);
 	OInMemoryBlkno (*size) (PagePool *pool);
 
 	/* Usage tracking */
 	void		(*ucm_inc_usage) (PagePool *pool, OInMemoryBlkno blkno);
-	void		(*ucm_change_usage) (PagePool *pool, OInMemoryBlkno blkno, uint32 usageCount);
-	uint32		(*ucm_get_epoch) (PagePool *pool);
-	bool		(*ucm_epoch_needs_shift) (PagePool *pool);
-	void		(*ucm_epoch_shift) (PagePool *pool);
-	uint64		(*ucm_update_state) (PagePool *pool, OInMemoryBlkno blkno, uint64 state);
-	void		(*ucm_after_update_state) (PagePool *pool, OInMemoryBlkno blkno, uint64 oldState, uint64 newState);
+	void		(*ucm_init) (PagePool *pool, OInMemoryBlkno blkno);
 
-	Pointer		(*get_pagedesc_array) (PagePool *pool);
+	/*
+	 * Build page API - allows building directly into pool pages to avoid
+	 * copying.
+	 */
+	Page		(*alloc_build_page) (PagePool *pool, uint64 *handle);
+	uint64		(*finalize_build_page) (PagePool *pool, BTreeDescr *desc,
+										Page img, uint64 handle,
+										FileExtent *extent, BTreeMetaPage *metaPage);
+	void		(*free_build_page) (PagePool *pool, Page img, uint64 handle);
 } PagePoolOps;
 
 typedef struct PagePool
@@ -107,14 +110,26 @@ typedef struct OPagePool
 extern Size o_ppool_estimate_space(OPagePool *pool, OInMemoryBlkno offset, OInMemoryBlkno size, bool debug);
 extern void o_ppool_shmem_init(OPagePool *pool, Pointer ptr, bool found);
 
+/* Local memory page pool handler */
+typedef struct LocalPagePool
+{
+	PagePool	base;
+	MemoryContext slab_context;
+	uint32		size;
+	uint32		current_slot;
+} LocalPagePool;
+
+
+extern void local_ppool_init(LocalPagePool *pool);
+
 #define PAGE_DESC_FLAG_DIRTY			1	/* Modified since the the last
 											 * time being written out */
 #define PAGE_DESC_FLAG_CONCURRENT_DIRTY	2	/* Second "dirty" flag used to
 											 * detect changes concurrent to
 											 * write operatorions */
 #define PAGE_DESC_FLAG_BOTH_DIRTY		(PAGE_DESC_FLAG_DIRTY | PAGE_DESC_FLAG_CONCURRENT_DIRTY)
-#define IS_DIRTY(blkno) (O_GET_IN_MEMORY_PAGEDESC(blkno)->flags & PAGE_DESC_FLAG_DIRTY)
-#define IS_DIRTY_CONCURRENT(blkno) (O_GET_IN_MEMORY_PAGEDESC(blkno)->flags & PAGE_DESC_FLAG_CONCURRENT_DIRTY)
+#define IS_DIRTY(blkno) ((O_GET_IN_MEMORY_PAGEDESC(blkno)->flags & PAGE_DESC_FLAG_DIRTY) && !O_PAGE_IS_LOCAL(blkno))
+#define IS_DIRTY_CONCURRENT(blkno) ((O_GET_IN_MEMORY_PAGEDESC(blkno)->flags & PAGE_DESC_FLAG_CONCURRENT_DIRTY) && !O_PAGE_IS_LOCAL(blkno))
 #define CLEAN_DIRTY_CONCURRENT(blkno) (O_GET_IN_MEMORY_PAGEDESC(blkno)->flags &= ~PAGE_DESC_FLAG_CONCURRENT_DIRTY)
 
 /*  Local page can never be dirty as it's never synced with disk */

@@ -96,6 +96,8 @@ static Size main_buffers_offset;
 
 Pointer		o_shared_buffers = NULL;
 OrioleDBPageDesc *page_descs = NULL;
+Page	   *local_ppool_pages = NULL;
+OrioleDBPageDesc *local_ppool_page_descs = NULL;
 
 /* Custom GUC variables */
 static int	main_buffers_guc;
@@ -151,6 +153,7 @@ int			rewind_max_time = 0;
 int			rewind_max_transactions = 0;
 int			logical_xid_buffers_guc = 64;
 bool		orioledb_strict_mode = false;
+bool		enable_local_page_pool_guc = false;
 
 /* Previous values of hooks to chain call them */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -174,6 +177,7 @@ MemoryContext btree_insert_context = NULL;
 MemoryContext btree_seqscan_context = NULL;
 
 OPagePool	page_pools[OPagePoolTypesCount];
+LocalPagePool local_ppool;
 
 static size_t page_pools_size[OPagePoolTypesCount];
 
@@ -1000,6 +1004,17 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomBoolVariable("orioledb.enable_local_page_pool",
+							 "Enables creation of temporary tables in an optimized local page pool.",
+							 NULL,
+							 &enable_local_page_pool_guc,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	if (orioledb_s3_mode)
 	{
 		if (!s3_host || !s3_region || !s3_accesskey || !s3_secretkey)
@@ -1062,6 +1077,8 @@ _PG_init(void)
 
 	for (i = 0; i < OPagePoolTypesCount; i++)
 		page_pools_size[i] = CACHELINEALIGN(page_pools_size[i]);
+
+	local_ppool_init(&local_ppool);
 
 	if (device_filename)
 	{
@@ -1292,12 +1309,7 @@ ppools_shmem_init(Pointer ptr, bool found)
 
 		for (i = 0; i < page_descs_size / sizeof(OrioleDBPageDesc); i++)
 		{
-			page_descs[i].fileExtent.len = InvalidFileExtentLen;
-			page_descs[i].fileExtent.off = InvalidFileExtentOff;
-			ORelOidsSetInvalid(page_descs[i].oids);
-			page_descs[i].ionum = -1;
-			page_descs[i].type = 0;
-			page_descs[i].flags = 0;
+			o_page_desc_init(&page_descs[i]);
 		}
 	}
 }
@@ -1383,6 +1395,17 @@ orioledb_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 
 	shared_segment_initialized = true;
+}
+
+void
+o_page_desc_init(OrioleDBPageDesc *desc)
+{
+	desc->fileExtent.len = InvalidFileExtentLen;
+	desc->fileExtent.off = InvalidFileExtentOff;
+	ORelOidsSetInvalid(desc->oids);
+	desc->ionum = -1;
+	desc->type = 0;
+	desc->flags = 0;
 }
 
 uint64
@@ -1718,6 +1741,9 @@ get_ppool(OPagePoolType type)
 PagePool *
 get_ppool_by_blkno(OInMemoryBlkno blkno)
 {
+	if (O_PAGE_IS_LOCAL(blkno))
+		return (PagePool *) &local_ppool;
+
 	Assert(blkno < orioledb_buffers_count);
 
 	if (blkno >= main_buffers_offset)
@@ -1912,7 +1938,7 @@ orioledb_get_relation_info_hook(PlannerInfo *root,
 					}
 					Assert(ix_num < descr->nIndices);
 					Assert(index_descr);
-					o_btree_load_shmem(&index_descr->desc);
+					o_btree_ensure_initialized(&index_descr->desc);
 					rootPageBlkno = index_descr->desc.rootInfo.rootPageBlkno;
 					root_page = O_GET_IN_MEMORY_PAGE(rootPageBlkno);
 					info->tree_height = PAGE_GET_LEVEL(root_page);

@@ -1483,8 +1483,7 @@ load_page(OBTreeFindPageContext *context)
 	}
 
 	put_page_image(blkno, buf);
-	(*desc->ppool->ops->ucm_change_usage) (desc->ppool, blkno,
-										   ((*desc->ppool->ops->ucm_get_epoch) (desc->ppool) + 2) % UCM_USAGE_LEVELS);
+	(*desc->ppool->ops->ucm_init) (desc->ppool, blkno);
 	page_desc->type = parent_page_desc->type;
 	page_desc->oids = parent_page_desc->oids;
 
@@ -2890,7 +2889,7 @@ write_tree_pages_recursive(UndoLogType undoType,
 static void
 write_tree_pages(BTreeDescr *desc, int maxLevel, bool evict)
 {
-	o_btree_load_shmem(desc);
+	o_btree_ensure_initialized(desc);
 	if (!write_tree_pages_recursive(desc->undoType,
 									desc->rootInfo.rootPageBlkno,
 									desc->rootInfo.rootPageChangeCount,
@@ -2899,7 +2898,7 @@ write_tree_pages(BTreeDescr *desc, int maxLevel, bool evict)
 		desc->rootInfo.rootPageBlkno = OInvalidInMemoryBlkno;
 		desc->rootInfo.metaPageBlkno = OInvalidInMemoryBlkno;
 		desc->rootInfo.rootPageChangeCount = 0;
-		o_btree_load_shmem(desc);
+		o_btree_ensure_initialized(desc);
 		(void) write_tree_pages_recursive(desc->undoType,
 										  desc->rootInfo.rootPageBlkno,
 										  desc->rootInfo.rootPageChangeCount,
@@ -3291,7 +3290,7 @@ try_to_punch_holes(BTreeDescr *desc)
 	Assert(orioledb_use_sparse_files);
 	Assert(!OCompressIsValid(desc->compress));
 
-	o_btree_load_shmem(desc);
+	o_btree_ensure_initialized(desc);
 	metaPage = BTREE_GET_META(desc);
 	metaLock = &metaPage->metaLock;
 	punchHolesLock = &metaPage->punchHolesLock;
