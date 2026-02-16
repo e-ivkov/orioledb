@@ -22,6 +22,7 @@
 #include "catalog/o_tables.h"
 #include "catalog/o_sys_cache.h"
 #include "storage/lockdefs.h"
+#include "tableam/descr.h"
 #include "tableam/operations.h"
 #include "catalog/pg_am.h"
 #include "tableam/toast.h"
@@ -2004,16 +2005,20 @@ o_drop_table(ORelOids oids)
 	OSnapshot	oSnapshot;
 	OXid		oxid;
 	OTable	   *table;
+	OTableDescr*descr;
 	ORelOids   *treeOids;
 	int			numTreeOids;
+	BTreeStorageType storageType;
 
 	fill_current_oxid_osnapshot(&oxid, &oSnapshot);
 
 	o_tables_table_meta_lock(NULL);
+	descr = o_fetch_table_descr(oids);
+	storageType = GET_PRIMARY(descr)->desc.storageType;
 	table = o_tables_drop_by_oids(oids, oxid, oSnapshot.csn);
 	o_tables_table_meta_unlock(NULL, InvalidOid);
 	treeOids = o_table_make_index_oids(table, &numTreeOids);
-	add_undo_drop_relnode(oids, treeOids, numTreeOids);
+	add_undo_drop_relnode(oids, treeOids, numTreeOids, storageType);
 	pfree(treeOids);
 	o_table_free(table);
 }

@@ -950,7 +950,7 @@ btree_relnode_undo_callback(UndoLogType undoType, UndoLocation location,
 static inline void
 add_undo_relnode(ORelOids oldOids, ORelOids *oldTreeOids, int oldNumTreeOids,
 				 ORelOids newOids, ORelOids *newTreeOids, int newNumTreeOids,
-				 bool fsync)
+				 BTreeStorageType storageType, bool fsync)
 {
 	LocationIndex size;
 	UndoLocation location;
@@ -996,6 +996,7 @@ add_undo_relnode(ORelOids oldOids, ORelOids *oldTreeOids, int oldNumTreeOids,
 		item->oldNumTreeOids = stepOldTreeOids;
 		item->newRelnode = newOids.relnode;
 		item->newNumTreeOids = stepNewTreeOids;
+		item->storageType = storageType;
 		item->fsync = fsync;
 
 		if (oldNumTreeOids > 0)
@@ -1028,32 +1029,32 @@ void
 add_undo_truncate_relnode(ORelOids oldOids, ORelOids *oldTreeOids,
 						  int oldNumTreeOids,
 						  ORelOids newOids, ORelOids *newTreeOids,
-						  int newNumTreeOids, bool fsync)
+						  int newNumTreeOids, BTreeStorageType storageType, bool fsync)
 {
 	Assert(ORelOidsIsValid(oldOids) && ORelOidsIsValid(newOids));
 	Assert(oldOids.datoid == newOids.datoid);
 	Assert(oldOids.reloid == newOids.reloid);
 
 	add_undo_relnode(oldOids, oldTreeOids, oldNumTreeOids,
-					 newOids, newTreeOids, newNumTreeOids, fsync);
+					 newOids, newTreeOids, newNumTreeOids, fsync, storageType);
 }
 
 void
-add_undo_drop_relnode(ORelOids oids, ORelOids *treeOids, int numTreeOids)
+add_undo_drop_relnode(ORelOids oids, ORelOids *treeOids, int numTreeOids, BTreeStorageType storageType)
 {
 	ORelOids	invalid = {InvalidOid, InvalidOid, InvalidOid};
 
 	Assert(ORelOidsIsValid(oids));
-	add_undo_relnode(oids, treeOids, numTreeOids, invalid, NULL, 0, false);
+	add_undo_relnode(oids, treeOids, numTreeOids, invalid, NULL, 0, false, storageType);
 }
 
 void
-add_undo_create_relnode(ORelOids oids, ORelOids *treeOids, int numTreeOids, bool fsync)
+add_undo_create_relnode(ORelOids oids, ORelOids *treeOids, int numTreeOids, BTreeStorageType storageType, bool fsync)
 {
 	ORelOids	invalid = {InvalidOid, InvalidOid, InvalidOid};
 
 	Assert(ORelOidsIsValid(oids));
-	add_undo_relnode(invalid, NULL, 0, oids, treeOids, numTreeOids, fsync);
+	add_undo_relnode(invalid, NULL, 0, oids, treeOids, numTreeOids, fsync, storageType);
 }
 
 static void

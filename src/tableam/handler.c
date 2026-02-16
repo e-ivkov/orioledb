@@ -819,6 +819,7 @@ orioledb_relation_set_new_filenode(Relation rel,
 	{
 		OTable	   *old_o_table,
 				   *new_o_table;
+		OTableDescr *descr;
 		TupleDesc	tupdesc;
 		OSnapshot	oSnapshot;
 		OXid		oxid;
@@ -846,6 +847,8 @@ orioledb_relation_set_new_filenode(Relation rel,
 		ORelOidsSetFromRel(old_oids, rel);
 		old_o_table = o_tables_get(old_oids);
 		Assert(old_o_table != NULL);
+		descr = o_fetch_table_descr(old_oids);
+		Assert(descr != NULL);
 		oldTreeOids = o_table_make_index_oids(old_o_table, &oldTreeOidsNum);
 
 		tupdesc = RelationGetDescr(rel);
@@ -903,7 +906,7 @@ orioledb_relation_set_new_filenode(Relation rel,
 		Assert(o_fetch_table_descr(new_oids) != NULL);
 		is_temp = rel->rd_rel->relpersistence == RELPERSISTENCE_TEMP;
 		add_undo_truncate_relnode(old_oids, oldTreeOids, oldTreeOidsNum,
-								  new_oids, newTreeOids, newTreeOidsNum, !is_temp);
+								  new_oids, newTreeOids, newTreeOidsNum, !is_temp, GET_PRIMARY(descr)->desc.storageType);
 		pfree(oldTreeOids);
 		pfree(newTreeOids);
 	}

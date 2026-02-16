@@ -14,6 +14,7 @@
 #ifndef __BTREE_UNDO_H__
 #define __BTREE_UNDO_H__
 
+#include "btree/btree.h"
 #include "btree/page_contents.h"
 
 /*
@@ -71,6 +72,7 @@ typedef struct
 	int			oldNumTreeOids;
 	Oid			newRelnode;
 	int			newNumTreeOids;
+	BTreeStorageType storageType;
 	bool		fsync;
 	ORelOids	oids[FLEXIBLE_ARRAY_MEMBER];
 } RelnodeUndoStackItem;
@@ -161,11 +163,12 @@ extern void add_undo_truncate_relnode(ORelOids oldOids, ORelOids *oldTreeOids,
 									  int oldNumTreeOids,
 									  ORelOids newOids, ORelOids *newTreeOids,
 									  int newNumTreeOids,
+									  BTreeStorageType storageType,
 									  bool fsync);
 extern void add_undo_drop_relnode(ORelOids oids, ORelOids *treeOids,
-								  int numTreeOids);
+								  int numTreeOids, BTreeStorageType storageType);
 extern void add_undo_create_relnode(ORelOids oids, ORelOids *treeOids,
-									int numTreeOids, bool fsync);
+									int numTreeOids, BTreeStorageType storageType, bool fsync);
 extern void check_pending_truncates(void);
 extern UndoLocation walk_undo_range_with_buf(UndoLogType undoType, UndoLocation location,
 											 UndoLocation toLoc,
