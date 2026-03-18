@@ -63,16 +63,6 @@ typedef struct PagePoolOps
 	/* Usage tracking */
 	void		(*ucm_inc_usage) (PagePool *pool, OInMemoryBlkno blkno);
 	void		(*ucm_init) (PagePool *pool, OInMemoryBlkno blkno);
-
-	/*
-	 * Build page API - allows building directly into pool pages to avoid
-	 * copying.
-	 */
-	Page		(*alloc_build_page) (PagePool *pool, uint64 *handle);
-	uint64		(*finalize_build_page) (PagePool *pool, BTreeDescr *desc,
-										Page img, uint64 handle,
-										FileExtent *extent, BTreeMetaPage *metaPage);
-	void		(*free_build_page) (PagePool *pool, Page img, uint64 handle);
 } PagePoolOps;
 
 typedef struct PagePool

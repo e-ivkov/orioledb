@@ -104,9 +104,11 @@ static int	main_buffers_guc;
 static int	undo_buffers_guc;
 static int	xid_buffers_guc;
 static int	rewind_buffers_guc;
-int			max_procs;
+static int	temp_buffers_guc;
+int	        max_procs;
 Size		orioledb_buffers_size;
 Size		orioledb_buffers_count;
+Size		orioledb_temp_buffers_count;
 Size		page_descs_size;
 Size		undo_circular_buffer_size;
 uint32		undo_buffers_count;
@@ -153,7 +155,6 @@ int			rewind_max_time = 0;
 int			rewind_max_transactions = 0;
 int			logical_xid_buffers_guc = 64;
 bool		orioledb_strict_mode = false;
-bool		enable_local_page_pool_guc = false;
 
 /* Previous values of hooks to chain call them */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -489,6 +490,20 @@ _PG_init(void)
 							NULL,
 							NULL,
 							NULL);
+	
+	DefineCustomIntVariable("orioledb.temp_buffers",
+								"Size of orioledb engine buffers for temporary tables.",
+								NULL,
+								&temp_buffers_guc,
+								PPOOL_MIN_SIZE * 8,
+								PPOOL_MIN_SIZE,
+								INT_MAX,
+								PGC_POSTMASTER,
+								GUC_UNIT_BLOCKS,
+								NULL,
+								NULL,
+								NULL);
+
 
 	DefineCustomRealVariable("orioledb.regular_block_undo_circular_buffer_fraction",
 							 "Fraction of cirucular buffer for block-level undo of regular tables.",
@@ -1004,17 +1019,6 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
-	DefineCustomBoolVariable("orioledb.enable_local_page_pool",
-							 "Enables creation of temporary tables in an optimized local page pool.",
-							 NULL,
-							 &enable_local_page_pool_guc,
-							 false,
-							 PGC_USERSET,
-							 0,
-							 NULL,
-							 NULL,
-							 NULL);
-
 	if (orioledb_s3_mode)
 	{
 		if (!s3_host || !s3_region || !s3_accesskey || !s3_secretkey)
@@ -1031,6 +1035,7 @@ _PG_init(void)
 	main_buffers_count = ((Size) main_buffers_guc * (Size) BLCKSZ) / ORIOLEDB_BLCKSZ;
 	free_tree_buffers_count = ((Size) free_tree_buffers_guc * (Size) BLCKSZ) / ORIOLEDB_BLCKSZ;
 	catalog_buffers_count = ((Size) catalog_buffers_guc * (Size) BLCKSZ) / ORIOLEDB_BLCKSZ;
+	orioledb_temp_buffers_count = ((Size) temp_buffers_guc * (Size) BLCKSZ) / ORIOLEDB_BLCKSZ;
 
 	main_buffers_offset = free_tree_buffers_count + catalog_buffers_count;
 
@@ -1938,7 +1943,7 @@ orioledb_get_relation_info_hook(PlannerInfo *root,
 					}
 					Assert(ix_num < descr->nIndices);
 					Assert(index_descr);
-					o_btree_ensure_initialized(&index_descr->desc);
+					o_btree_load_shmem(&index_descr->desc);
 					rootPageBlkno = index_descr->desc.rootInfo.rootPageBlkno;
 					root_page = O_GET_IN_MEMORY_PAGE(rootPageBlkno);
 					info->tree_height = PAGE_GET_LEVEL(root_page);

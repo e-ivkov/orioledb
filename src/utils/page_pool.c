@@ -47,10 +47,6 @@ OInMemoryBlkno o_ppool_size(PagePool *pool);
 void		o_ucm_inc_usage(PagePool *pool, OInMemoryBlkno blkno);
 void		o_ucm_init(PagePool *pool, OInMemoryBlkno blkno);
 
-Page		o_ppool_alloc_build_page(PagePool *pool, uint64 *handle);
-uint64		o_ppool_finalize_build_page(PagePool *pool, BTreeDescr *desc, Page img, uint64 handle, FileExtent *extent, BTreeMetaPage *metaPage);
-void		o_ppool_free_build_page(PagePool *pool, Page img, uint64 handle);
-
 /* PagePoolOps for a shared memory based page pool */
 static const PagePoolOps o_page_pool_ops = {
 	.alloc_page = o_ppool_get_page,
@@ -67,10 +63,6 @@ static const PagePoolOps o_page_pool_ops = {
 
 	.ucm_inc_usage = o_ucm_inc_usage,
 	.ucm_init = o_ucm_init,
-
-	.alloc_build_page = o_ppool_alloc_build_page,
-	.finalize_build_page = o_ppool_finalize_build_page,
-	.free_build_page = o_ppool_free_build_page,
 };
 
 /* Shared local memory based page pool operations */
@@ -90,10 +82,6 @@ OInMemoryBlkno local_ppool_size(PagePool *pool);
 void		local_ucm_inc_usage(PagePool *pool, OInMemoryBlkno blkno);
 void		local_ucm_init(PagePool *pool, OInMemoryBlkno blkno);
 
-Page		local_ppool_alloc_build_page(PagePool *pool, uint64 *handle);
-uint64		local_ppool_finalize_build_page(PagePool *pool, BTreeDescr *desc, Page img, uint64 handle, FileExtent *extent, BTreeMetaPage *metaPage);
-void		local_ppool_free_build_page(PagePool *pool, Page img, uint64 handle);
-
 /* PagePoolOps for a local memory based page pool */
 static const PagePoolOps local_ppool_ops = {
 	.alloc_page = local_ppool_alloc_page,
@@ -110,10 +98,6 @@ static const PagePoolOps local_ppool_ops = {
 
 	.ucm_inc_usage = local_ucm_inc_usage,
 	.ucm_init = local_ucm_init,
-
-	.alloc_build_page = local_ppool_alloc_build_page,
-	.finalize_build_page = local_ppool_finalize_build_page,
-	.free_build_page = local_ppool_free_build_page,
 };
 
 /*
@@ -457,43 +441,6 @@ o_ucm_init(PagePool *pool, OInMemoryBlkno blkno)
 	page_change_usage_count(&o_pool->ucm, blkno, (pg_atomic_read_u32(o_pool->ucm.epoch) + 2) % UCM_USAGE_LEVELS);
 }
 
-/*
- * Allocate a page for index building. For the shared memory pool,
- * we just palloc a temporary buffer since the page will be written to disk.
- */
-Page
-o_ppool_alloc_build_page(PagePool *pool, uint64 *handle)
-{
-	Page		img = (Page) palloc0(ORIOLEDB_BLCKSZ);
-
-	*handle = 0;				/* unused for disk-based pool */
-	return img;
-}
-
-/*
- * Finalize a build page by writing it to disk and freeing the temporary buffer.
- */
-uint64
-o_ppool_finalize_build_page(PagePool *pool, BTreeDescr *desc, Page img,
-							uint64 handle, FileExtent *extent,
-							BTreeMetaPage *metaPage)
-{
-	uint64		downlink;
-
-	downlink = perform_page_io_build(desc, img, extent, metaPage);
-	pfree(img);
-	return downlink;
-}
-
-/*
- * Free a build page that was never finalized.
- */
-void
-o_ppool_free_build_page(PagePool *pool, Page img, uint64 handle)
-{
-	pfree(img);
-}
-
 void
 local_ppool_init(LocalPagePool *pool)
 {
@@ -634,40 +581,4 @@ void
 local_ucm_init(PagePool *pool, OInMemoryBlkno blkno)
 {
 	/* Stub: do nothing */
-}
-
-/*
- * Allocate a page directly from the local page pool.
- * This allows building directly into pool pages, avoiding a copy.
- */
-Page
-local_ppool_alloc_build_page(PagePool *pool, uint64 *handle)
-{
-	OInMemoryBlkno blkno = (*pool->ops->alloc_page) (pool, PPOOL_RESERVE_META);
-	Page		p = O_GET_IN_MEMORY_PAGE(blkno);
-
-	*handle = blkno;
-	return p;
-}
-
-/*
- * Finalize a build page. For local page pool, the page is already in the pool,
- * so we just return the blkno as the downlink.
- */
-uint64
-local_ppool_finalize_build_page(PagePool *pool, BTreeDescr *desc, Page img,
-								uint64 handle, FileExtent *extent,
-								BTreeMetaPage *metaPage)
-{
-	/* The handle is the blkno - just return it as the downlink */
-	return handle;
-}
-
-/*
- * Free a build page that was never finalized.
- */
-void
-local_ppool_free_build_page(PagePool *pool, Page img, uint64 handle)
-{
-	local_ppool_free_page(pool, (OInMemoryBlkno) handle, false);
 }
