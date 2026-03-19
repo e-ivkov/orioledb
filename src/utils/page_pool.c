@@ -68,7 +68,6 @@ static const PagePoolOps o_page_pool_ops = {
 /* Shared local memory based page pool operations */
 
 OInMemoryBlkno local_ppool_alloc_page(PagePool *pool, int kind);
-OInMemoryBlkno local_ppool_alloc_metapage(PagePool *pool);
 void		local_ppool_free_page(PagePool *pool, OInMemoryBlkno blkno, bool haveLock);
 
 void		local_ppool_reserve_pages(PagePool *pool, int kind, int count);
@@ -85,7 +84,8 @@ void		local_ucm_init(PagePool *pool, OInMemoryBlkno blkno);
 /* PagePoolOps for a local memory based page pool */
 static const PagePoolOps local_ppool_ops = {
 	.alloc_page = local_ppool_alloc_page,
-	.alloc_metapage = local_ppool_alloc_metapage,
+	/* This is intentional as implementation is the same for both pools */
+	.alloc_metapage = o_ppool_get_metapage,
 	.free_page = local_ppool_free_page,
 
 	.reserve_pages = local_ppool_reserve_pages,
@@ -444,15 +444,15 @@ o_ucm_init(PagePool *pool, OInMemoryBlkno blkno)
 void
 local_ppool_init(LocalPagePool *pool)
 {
-	local_ppool_pages = calloc(LOCAL_PPOOL_INIT_SIZE, sizeof(Page));
-	local_ppool_page_descs = calloc(LOCAL_PPOOL_INIT_SIZE, sizeof(OrioleDBPageDesc));
+	local_ppool_pages = calloc(orioledb_temp_buffers_count, sizeof(Page));
+	local_ppool_page_descs = calloc(orioledb_temp_buffers_count, sizeof(OrioleDBPageDesc));
 	if (!local_ppool_pages || !local_ppool_page_descs)
 		ereport(ERROR, errmsg("Failed to allocate memory for local page pool"));
 
-	for (int i = 0; i < LOCAL_PPOOL_INIT_SIZE; i++)
+	for (int i = 0; i < orioledb_temp_buffers_count; i++)
 		o_page_desc_init(&local_ppool_page_descs[i]);
 
-	pool->size = LOCAL_PPOOL_INIT_SIZE;
+	pool->size = orioledb_temp_buffers_count; // THOUGHT: remove it?
 	pool->current_slot = 0;
 	pool->slab_context = SlabContextCreate(TopMemoryContext, "oriole local page pool", ORIOLEDB_BLCKSZ * 16, ORIOLEDB_BLCKSZ);
 	/* This might lead to PANIC on allocation failure in critical section */
@@ -467,10 +467,9 @@ local_ppool_alloc_page(PagePool *pool, int kind)
 
 	int			start = local_pool->current_slot;
 	int			i = start;
-	int			old_size = local_pool->size;
-	int			new_size;
-	Page	   *new_pages;
-	OrioleDBPageDesc *new_page_descs;
+	
+	Assert(local_pool->numPagesReserved[kind] > 0);
+	local_pool->numPagesReserved[kind]--;
 
 	/* Iterate through local_pool->pages to find a free slot */
 	do
@@ -482,73 +481,71 @@ local_ppool_alloc_page(PagePool *pool, int kind)
 		{
 			local_ppool_pages[i] = (Page) MemoryContextAllocZero(local_pool->slab_context, ORIOLEDB_BLCKSZ);
 			local_pool->current_slot = i;
+			local_pool->availablePagesCount--;
 			/* Set the local page bit */
 			return i | 0x80000000;
 		}
 	} while (i != start);
 
-	/* Failed to find a free slot - increase pages array size */
-
-	new_size = local_pool->size * 2;
-	new_pages = realloc(local_ppool_pages, new_size * sizeof(Page));
-	new_page_descs = realloc(local_ppool_page_descs, new_size * sizeof(OrioleDBPageDesc));
-
-	if (!new_pages || !new_page_descs)
-	{
-		/*
-		 * Original pointers remain valid if their realloc failed, keeping
-		 * state consistent.
-		 */
-		ereport(ERROR, errmsg("Failed to allocate memory for local page pool"));
-	}
-
-	local_ppool_pages = new_pages;
-	local_ppool_page_descs = new_page_descs;
-	local_pool->size = new_size;
-	memset(local_ppool_pages + old_size, 0, old_size * sizeof(Page));
-
-	for (int j = old_size; j < new_size; j++)
-		o_page_desc_init(&local_ppool_page_descs[j]);
-
-	local_pool->current_slot = old_size;
-	local_ppool_pages[old_size] = (Page) MemoryContextAllocZero(local_pool->slab_context, ORIOLEDB_BLCKSZ);
-
-	/* Set the local page bit */
-	return old_size | 0x80000000;
-}
-
-OInMemoryBlkno
-local_ppool_alloc_metapage(PagePool *pool)
-{
-	/* Kind is not used */
-	return local_ppool_alloc_page(pool, 0);
+	pg_unreachable();	
 }
 
 void
 local_ppool_free_page(PagePool *pool, OInMemoryBlkno blkno, bool haveLock)
 {
 	int			i = blkno & O_BLKNO_MASK;
+	LocalPagePool  *local_pool = (LocalPagePool *) pool;
 
 	pfree(local_ppool_pages[i]);
 	local_ppool_pages[i] = NULL;
+	local_pool->availablePagesCount++;
 }
 
 void
 local_ppool_reserve_pages(PagePool *pool, int kind, int count)
 {
-	/* Stub: do nothing */
+   	uint32		val;
+	LocalPagePool  *local_pool = (LocalPagePool *) pool;
+   
+	count -= local_pool->numPagesReserved[kind];
+	if (count <= 0)
+		return;
+   
+	val = local_pool->availablePagesCount - count;
+	while (val & ((uint32) 1 << 31))
+	{
+		(*pool->ops->run_maintenance) (pool, true, NULL);
+		val = local_pool->availablePagesCount;
+	}
+   
+	local_pool->numPagesReserved[kind] += count;
 }
 
 void
 local_ppool_release_reserved(PagePool *pool, uint32 mask)
 {
-	/* Stub: do nothing */
+   	int			sum = 0,
+				kind;
+	LocalPagePool  *local_pool = (LocalPagePool *) pool;
+   
+	for (kind = 0; kind < PPOOL_RESERVE_COUNT; kind++)
+	{
+		if (mask & (1 << kind))
+		{
+			sum += local_pool->numPagesReserved[kind];
+			local_pool->numPagesReserved[kind] = 0;
+		}
+	}
+	
+	local_pool->availablePagesCount += sum;
 }
 
 OInMemoryBlkno
 local_ppool_free_pages_count(PagePool *pool)
 {
-	return UINT32_MAX;
+    LocalPagePool  *local_pool = (LocalPagePool *) pool;
+    
+	return local_pool->availablePagesCount;
 }
 
 OInMemoryBlkno
@@ -560,7 +557,25 @@ local_ppool_dirty_pages_count(PagePool *pool)
 void
 local_ppool_run_maintenance(PagePool *pool, bool evict, volatile sig_atomic_t *shutdown_requested)
 {
-	/* Stub: do nothing */
+	while (true)
+		{
+			if (shutdown_requested != NULL && *shutdown_requested)
+				break;
+
+			blkno = ucm_next_blkno(&o_pool->ucm, blkno, 1);
+
+			Assert(blkno >= o_pool->offset && blkno < o_pool->offset + o_pool->size);
+			if (walk_page(blkno, evict) != OWalkPageSkipped)
+			{
+			    /* TODO: if merged pages or evicted, set slot to NULL */
+				Assert(!have_locked_pages());
+				break;
+			}
+			Assert(!have_locked_pages());
+			blkno++;
+			if (blkno >= o_pool->offset + o_pool->size)
+				blkno = o_pool->offset;
+		}
 }
 
 OInMemoryBlkno

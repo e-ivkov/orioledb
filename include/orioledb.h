@@ -399,6 +399,7 @@ typedef struct
 /* orioledb.c */
 extern Size orioledb_buffers_size;
 extern Size orioledb_buffers_count;
+extern Size orioledb_temp_buffers_count;
 extern Size undo_circular_buffer_size;
 extern uint32 undo_buffers_count;
 extern Size xid_circular_buffer_size;
