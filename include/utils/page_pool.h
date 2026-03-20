@@ -106,11 +106,13 @@ typedef struct LocalPagePool
 	PagePool	base;
 	MemoryContext slab_context;
 	uint32		size;
-	uint32		current_slot;
+	uint32		alloc_current_slot;
+	uint32		evict_current_slot;
 	/* count of available to reserve pages in the pool */
 	uint32 availablePagesCount;
 	/* reserved pages count by type array */
 	uint32 numPagesReserved[PPOOL_RESERVE_COUNT];
+    uint32 *usage_count;	
 } LocalPagePool;
 
 

@@ -446,14 +446,19 @@ local_ppool_init(LocalPagePool *pool)
 {
 	local_ppool_pages = calloc(orioledb_temp_buffers_count, sizeof(Page));
 	local_ppool_page_descs = calloc(orioledb_temp_buffers_count, sizeof(OrioleDBPageDesc));
-	if (!local_ppool_pages || !local_ppool_page_descs)
+	pool->usage_count = calloc(orioledb_temp_buffers_count, sizeof(uint32));
+	
+	if (!local_ppool_pages || !local_ppool_page_descs || !pool->usage_count)
 		ereport(ERROR, errmsg("Failed to allocate memory for local page pool"));
 
 	for (int i = 0; i < orioledb_temp_buffers_count; i++)
 		o_page_desc_init(&local_ppool_page_descs[i]);
 
 	pool->size = orioledb_temp_buffers_count; // THOUGHT: remove it?
-	pool->current_slot = 0;
+	pool->alloc_current_slot = 0;
+	pool->availablePagesCount = orioledb_temp_buffers_count;
+	for(int i = 0; i < PPOOL_RESERVE_COUNT; i++)
+		pool->numPagesReserved[i] = 0;
 	pool->slab_context = SlabContextCreate(TopMemoryContext, "oriole local page pool", ORIOLEDB_BLCKSZ * 16, ORIOLEDB_BLCKSZ);
 	/* This might lead to PANIC on allocation failure in critical section */
 	MemoryContextAllowInCriticalSection(pool->slab_context, true);
@@ -465,7 +470,7 @@ local_ppool_alloc_page(PagePool *pool, int kind)
 {
 	LocalPagePool *local_pool = (LocalPagePool *) pool;
 
-	int			start = local_pool->current_slot;
+	int			start = local_pool->alloc_current_slot;
 	int			i = start;
 	
 	Assert(local_pool->numPagesReserved[kind] > 0);
@@ -480,8 +485,7 @@ local_ppool_alloc_page(PagePool *pool, int kind)
 		if (local_ppool_pages[i] == NULL)
 		{
 			local_ppool_pages[i] = (Page) MemoryContextAllocZero(local_pool->slab_context, ORIOLEDB_BLCKSZ);
-			local_pool->current_slot = i;
-			local_pool->availablePagesCount--;
+			local_pool->alloc_current_slot = i;
 			/* Set the local page bit */
 			return i | 0x80000000;
 		}
@@ -504,18 +508,16 @@ local_ppool_free_page(PagePool *pool, OInMemoryBlkno blkno, bool haveLock)
 void
 local_ppool_reserve_pages(PagePool *pool, int kind, int count)
 {
-   	uint32		val;
 	LocalPagePool  *local_pool = (LocalPagePool *) pool;
    
 	count -= local_pool->numPagesReserved[kind];
 	if (count <= 0)
 		return;
    
-	val = local_pool->availablePagesCount - count;
-	while (val & ((uint32) 1 << 31))
+	local_pool->availablePagesCount -= count;
+	while (local_pool->availablePagesCount & ((uint32) 1 << 31))
 	{
 		(*pool->ops->run_maintenance) (pool, true, NULL);
-		val = local_pool->availablePagesCount;
 	}
    
 	local_pool->numPagesReserved[kind] += count;
@@ -554,42 +556,111 @@ local_ppool_dirty_pages_count(PagePool *pool)
 	return 0;
 }
 
+/*
+ * Run clock replacement algorithm until we evict at least one page.
+ *
+ * This can be called from any backend that needs pages (via
+ * ppool_reserve_pages).  Because the caller may
+ * already have undo space reserved for its own operation, we save and
+ * restore the undo reservation state around the eviction work.
+ *
+ * We save both the reserved undo sizes and whether
+ * transactionUndoRetainLocation was set for UndoLogRegularPageLevel and
+ * UndoLogSystem.  Page merges during walk_page() may set these via
+ * get_undo_record() → set_my_reserved_location().  After we're done, we
+ * restore the caller's original reservation and free any retain locations
+ * that we introduced (i.e., that weren't set before we entered).
+ *
+ * Note: we only manage UndoLogRegularPageLevel and UndoLogSystem here
+ * because page-level merges only write undo to these types (via
+ * GET_PAGE_LEVEL_UNDO_TYPE).  UndoLogRegular is not touched by merges.
+ */
 void
 local_ppool_run_maintenance(PagePool *pool, bool evict, volatile sig_atomic_t *shutdown_requested)
 {
-	while (true)
-		{
-			if (shutdown_requested != NULL && *shutdown_requested)
-				break;
-
-			blkno = ucm_next_blkno(&o_pool->ucm, blkno, 1);
-
-			Assert(blkno >= o_pool->offset && blkno < o_pool->offset + o_pool->size);
-			if (walk_page(blkno, evict) != OWalkPageSkipped)
-			{
-			    /* TODO: if merged pages or evicted, set slot to NULL */
-				Assert(!have_locked_pages());
-				break;
-			}
-			Assert(!have_locked_pages());
-			blkno++;
-			if (blkno >= o_pool->offset + o_pool->size)
-				blkno = o_pool->offset;
+	Size		undoRegularSize = get_reserved_undo_size(UndoLogRegularPageLevel);
+	Size		undoSystemSize = get_reserved_undo_size(UndoLogSystem);
+	bool		haveRetainRegularLoc = undo_type_has_retained_location(UndoLogRegularPageLevel);
+	bool		haveRetainSystemLoc = undo_type_has_retained_location(UndoLogSystem);
+	LocalPagePool  *local_pool = (LocalPagePool *) pool;
+	bool        merged_or_evicted = false;
+	
+	/* Shutdown can be requested only from the bgwriter.
+	 * And bgwriter should not be running maintenance on local page pool.
+	 */
+	Assert(shutdown_requested == NULL);
+	/* Only bgwriter sets evict to false */
+	Assert(evict);
+   
+	/* We might need to merge pages */
+	reserve_undo_size(UndoLogRegularPageLevel, 2 * O_MERGE_UNDO_IMAGE_SIZE);
+	reserve_undo_size(UndoLogSystem, 2 * O_MERGE_UNDO_IMAGE_SIZE);
+    
+	while (!merged_or_evicted)
+	{
+        OWalkPageResult result;	
+        
+	    if(local_pool->evict_current_slot >= local_pool->size)
+	    {
+	        local_pool->evict_current_slot = 0;
+	    }
+	    if(local_pool->usage_count[local_pool->evict_current_slot] > 0) {
+				local_pool->usage_count[local_pool->evict_current_slot]--;
+				local_pool->evict_current_slot++;
+				continue;
 		}
+	    result = walk_page(local_pool->evict_current_slot | 0x80000000, evict);
+		switch (result) {
+		case OWalkPageEvicted:
+		case OWalkPageMerged:
+    		local_ppool_pages[local_pool->evict_current_slot] = NULL;
+    		merged_or_evicted = true;
+    		break;
+		case OWalkPageWritten:
+			elog(ERROR, "Page should have been merged or evicted");
+			break;
+		case OWalkPageSkipped:
+			break;
+		}
+		local_pool->evict_current_slot++;
+	}
+    
+    
+	/*
+	 * The caller might have the undo location reserved.  We need to carefully
+	 * put the undo location back.
+	 */
+	if (undoRegularSize > 0)
+		reserve_undo_size(UndoLogRegularPageLevel, undoRegularSize);
+	else
+		release_undo_size(UndoLogRegularPageLevel);
+    
+	if (undoSystemSize > 0)
+		reserve_undo_size(UndoLogSystem, undoSystemSize);
+	else
+		release_undo_size(UndoLogSystem);
+    
+	if (!haveRetainRegularLoc)
+		free_retained_undo_location(UndoLogRegularPageLevel);
+	if (!haveRetainSystemLoc)
+		free_retained_undo_location(UndoLogSystem);
 }
 
 OInMemoryBlkno
 local_ppool_size(PagePool *pool)
 {
-	LocalPagePool *o_pool = (LocalPagePool *) pool;
+	LocalPagePool *local_pool = (LocalPagePool *) pool;
 
-	return o_pool->size;
+	return local_pool->size;
 }
 
 void
 local_ucm_inc_usage(PagePool *pool, OInMemoryBlkno blkno)
 {
-	/* Stub: do nothing */
+   int i = blkno & O_BLKNO_MASK; 
+   LocalPagePool *local_pool = (LocalPagePool *) pool;
+   
+   local_pool->usage_count[i]++;
 }
 
 void

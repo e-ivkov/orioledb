@@ -139,6 +139,7 @@ bgwriter_main(Datum main_arg)
 
 					while (need_eviction || need_write)
 					{
+    					/* Should not run maintenance for local page pool */
 						(*pool->ops->run_maintenance) (pool, need_eviction, &ShutdownRequestPending);
 						i++;
 
