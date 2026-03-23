@@ -454,9 +454,10 @@ local_ppool_init(LocalPagePool *pool)
 	for (int i = 0; i < orioledb_temp_buffers_count; i++)
 		o_page_desc_init(&local_ppool_page_descs[i]);
 
-	pool->size = orioledb_temp_buffers_count; // THOUGHT: remove it?
+	pool->size = orioledb_temp_buffers_count;
 	pool->alloc_current_slot = 0;
 	pool->availablePagesCount = orioledb_temp_buffers_count;
+	pool->dirtyPagesCount = 0;
 	for(int i = 0; i < PPOOL_RESERVE_COUNT; i++)
 		pool->numPagesReserved[i] = 0;
 	pool->slab_context = SlabContextCreate(TopMemoryContext, "oriole local page pool", ORIOLEDB_BLCKSZ * 16, ORIOLEDB_BLCKSZ);
@@ -476,7 +477,7 @@ local_ppool_alloc_page(PagePool *pool, int kind)
 	Assert(local_pool->numPagesReserved[kind] > 0);
 	local_pool->numPagesReserved[kind]--;
 
-	/* Iterate through local_pool->pages to find a free slot */
+	/* Iterate through local_pool_pages to find a free slot */
 	do
 	{
 		i++;
@@ -487,7 +488,7 @@ local_ppool_alloc_page(PagePool *pool, int kind)
 			local_ppool_pages[i] = (Page) MemoryContextAllocZero(local_pool->slab_context, ORIOLEDB_BLCKSZ);
 			local_pool->alloc_current_slot = i;
 			/* Set the local page bit */
-			return i | 0x80000000;
+			return i | BLKNO_LOCAL_BIT;
 		}
 	} while (i != start);
 
@@ -609,11 +610,11 @@ local_ppool_run_maintenance(PagePool *pool, bool evict, volatile sig_atomic_t *s
 				local_pool->evict_current_slot++;
 				continue;
 		}
-	    result = walk_page(local_pool->evict_current_slot | 0x80000000, evict);
+	    result = walk_page(local_pool->evict_current_slot | BLKNO_LOCAL_BIT, evict);
 		switch (result) {
 		case OWalkPageEvicted:
 		case OWalkPageMerged:
-    		local_ppool_pages[local_pool->evict_current_slot] = NULL;
+            local_ppool_free_page(pool, local_pool->evict_current_slot | BLKNO_LOCAL_BIT, false);
     		merged_or_evicted = true;
     		break;
 		case OWalkPageWritten:
@@ -666,5 +667,8 @@ local_ucm_inc_usage(PagePool *pool, OInMemoryBlkno blkno)
 void
 local_ucm_init(PagePool *pool, OInMemoryBlkno blkno)
 {
-	/* Stub: do nothing */
+    int i = blkno & O_BLKNO_MASK; 
+    LocalPagePool *local_pool = (LocalPagePool *) pool;
+    
+    local_pool->usage_count[i] = 1;
 }

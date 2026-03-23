@@ -117,15 +117,8 @@ index_btree_desc_init(BTreeDescr *desc, OCompress compress, int fillfactor,
 	desc->ppool = get_ppool(OPagePoolMain);
 	if (persistence == RELPERSISTENCE_TEMP)
 	{
-		if (enable_local_page_pool_guc)
-		{
-			desc->ppool = (PagePool *) &local_ppool;
-			desc->storageType = BTreeStorageInMemory;
-		}
-		else
-		{
-			desc->storageType = BTreeStorageTemporary;
-		}
+		desc->ppool = (PagePool *) &local_ppool;
+		desc->storageType = BTreeStorageTemporary;
 	}
 	else if (persistence == RELPERSISTENCE_UNLOGGED)
 		desc->storageType = BTreeStorageUnlogged;

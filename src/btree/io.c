@@ -3290,7 +3290,7 @@ try_to_punch_holes(BTreeDescr *desc)
 	Assert(orioledb_use_sparse_files);
 	Assert(!OCompressIsValid(desc->compress));
 
-	o_btree_ensure_initialized(desc);
+	o_btree_load_shmem(desc);
 	metaPage = BTREE_GET_META(desc);
 	metaLock = &metaPage->metaLock;
 	punchHolesLock = &metaPage->punchHolesLock;
